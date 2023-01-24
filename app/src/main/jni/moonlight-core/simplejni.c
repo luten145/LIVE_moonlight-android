@@ -7,6 +7,17 @@
 #include <string.h>
 
 JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_sendLutenPack(JNIEnv *env, jclass clazz, jbyteArray byte) {
+    JNIEnv envT  = *env;
+    jbyte* jByteAdd = envT ->GetByteArrayElements(env, byte, NULL);
+
+    char packet[200];
+    for(int i=0;i < (int) jByteAdd[0]; i++) packet[i] = jByteAdd[i];
+
+    LiSendLutenPackEvent(packet);
+}
+
+JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_sendMouseMove(JNIEnv *env, jclass clazz, jshort deltaX, jshort deltaY) {
     LiSendMouseMoveEvent(deltaX, deltaY);
 }

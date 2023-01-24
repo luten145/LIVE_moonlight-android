@@ -492,6 +492,11 @@ public class NvConnection {
             }
         }).start();
     }
+
+    public void sendLutenPack(final byte[] packet)
+    {
+        if (!isMonkey) MoonBridge.sendLutenPack(packet);
+    }
     
     public void sendMouseMove(final short deltaX, final short deltaY)
     {

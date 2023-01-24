@@ -1,6 +1,7 @@
 package com.limelight;
 
 
+import com.limelight.LutenPack.LutenPackInput;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
@@ -177,6 +178,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public static final String EXTRA_PC_NAME = "PcName";
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
+
+    private LutenPackInput lutenPack;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -535,6 +538,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
 
+        lutenPack = new LutenPackInput(this,conn);
+        lutenPack.onActivityEvent(0);
         // The connection will be started when the surface gets created
         streamView.getHolder().addCallback(this);
     }
@@ -1064,6 +1069,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                lutenPack.onActivityEvent(-1);
+            }
+        }).start();
 
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         if (controllerHandler != null) {

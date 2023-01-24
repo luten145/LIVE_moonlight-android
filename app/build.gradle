@@ -9,8 +9,8 @@ android {
         minSdk 16
         targetSdk 33
 
-        versionName "10.11"
-        versionCode = 301
+        versionName "0.0.1"
+        versionCode = 302
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
@@ -113,8 +113,9 @@ android {
             // is to please change the applicationId before you publish.
             //
             // TL;DR: Leave the following line alone!
+            applicationIdSuffix ".lutenpack"
             applicationIdSuffix ".unofficial"
-            resValue "string", "app_label", "Moonlight"
+            resValue "string", "app_label", "Moonlight LutenPack"
             resValue "string", "app_label_root", "Moonlight (Root)"
 
             minifyEnabled true
