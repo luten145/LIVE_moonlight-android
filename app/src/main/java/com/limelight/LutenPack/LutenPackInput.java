@@ -92,12 +92,13 @@ public class LutenPackInput {
 
     public void onActivityEvent(int state){
         if(iRemoteService != null) {
-            try {
-                iRemoteService.onActivityState(state);
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
+
         }
+    }
+
+    public void onDestory(){
+        onActivityEvent(-1);
+        context.unbindService(connection);
     }
 
 }

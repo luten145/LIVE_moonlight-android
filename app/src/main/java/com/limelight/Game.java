@@ -1070,12 +1070,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     protected void onDestroy() {
         super.onDestroy();
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                lutenPack.onActivityEvent(-1);
-            }
-        }).start();
+        lutenPack.onDestory();
 
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         if (controllerHandler != null) {
