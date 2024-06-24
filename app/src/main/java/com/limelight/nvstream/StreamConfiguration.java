@@ -22,13 +22,12 @@ public class StreamConfiguration {
     private int maxPacketSize;
     private int remote;
     private MoonBridge.AudioConfiguration audioConfiguration;
-    private boolean supportsHevc;
-    private int hevcBitratePercentageMultiplier;
-    private boolean enableHdr;
+    private int supportedVideoFormats;
     private int attachedGamepadMask;
     private int encryptionFlags;
     private int colorRange;
     private int colorSpace;
+    private boolean persistGamepadsAfterDisconnect;
 
     public static class Builder {
         private StreamConfiguration config = new StreamConfiguration();
@@ -84,16 +83,6 @@ public class StreamConfiguration {
             return this;
         }
 
-        public StreamConfiguration.Builder setHevcBitratePercentageMultiplier(int multiplier) {
-            config.hevcBitratePercentageMultiplier = multiplier;
-            return this;
-        }
-
-        public StreamConfiguration.Builder setEnableHdr(boolean enableHdr) {
-            config.enableHdr = enableHdr;
-            return this;
-        }
-
         public StreamConfiguration.Builder setAttachedGamepadMask(int attachedGamepadMask) {
             config.attachedGamepadMask = attachedGamepadMask;
             return this;
@@ -109,18 +98,13 @@ public class StreamConfiguration {
             return this;
         }
 
-        public StreamConfiguration.Builder setClientRefreshRateX100(int refreshRateX100) {
-            config.clientRefreshRateX100 = refreshRateX100;
+        public StreamConfiguration.Builder setPersistGamepadsAfterDisconnect(boolean value) {
+            config.persistGamepadsAfterDisconnect = value;
             return this;
         }
 
-        public StreamConfiguration.Builder setAudioEncryption(boolean enable) {
-            if (enable) {
-                config.encryptionFlags |= MoonBridge.ENCFLG_AUDIO;
-            }
-            else {
-                config.encryptionFlags &= ~MoonBridge.ENCFLG_AUDIO;
-            }
+        public StreamConfiguration.Builder setClientRefreshRateX100(int refreshRateX100) {
+            config.clientRefreshRateX100 = refreshRateX100;
             return this;
         }
 
@@ -129,8 +113,8 @@ public class StreamConfiguration {
             return this;
         }
         
-        public StreamConfiguration.Builder setHevcSupported(boolean supportsHevc) {
-            config.supportsHevc = supportsHevc;
+        public StreamConfiguration.Builder setSupportedVideoFormats(int supportedVideoFormats) {
+            config.supportedVideoFormats = supportedVideoFormats;
             return this;
         }
 
@@ -162,8 +146,7 @@ public class StreamConfiguration {
         this.sops = true;
         this.enableAdaptiveResolution = false;
         this.audioConfiguration = MoonBridge.AUDIO_CONFIGURATION_STEREO;
-        this.supportsHevc = false;
-        this.enableHdr = false;
+        this.supportedVideoFormats = MoonBridge.VIDEO_FORMAT_H264;
         this.attachedGamepadMask = 0;
     }
     
@@ -215,28 +198,20 @@ public class StreamConfiguration {
         return audioConfiguration;
     }
     
-    public boolean getHevcSupported() {
-        return supportsHevc;
-    }
-
-    public int getHevcBitratePercentageMultiplier() {
-        return hevcBitratePercentageMultiplier;
-    }
-
-    public boolean getEnableHdr() {
-        return enableHdr;
+    public int getSupportedVideoFormats() {
+        return supportedVideoFormats;
     }
 
     public int getAttachedGamepadMask() {
         return attachedGamepadMask;
     }
 
-    public int getClientRefreshRateX100() {
-        return clientRefreshRateX100;
+    public boolean getPersistGamepadsAfterDisconnect() {
+        return persistGamepadsAfterDisconnect;
     }
 
-    public int getEncryptionFlags() {
-        return encryptionFlags;
+    public int getClientRefreshRateX100() {
+        return clientRefreshRateX100;
     }
 
     public int getColorRange() {

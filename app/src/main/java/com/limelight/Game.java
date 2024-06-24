@@ -1,7 +1,6 @@
 package com.limelight;
 
 
-import com.limelight.LutenPack.LutenPackInput;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
@@ -24,6 +23,7 @@ import com.limelight.nvstream.StreamConfiguration;
 import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
+import com.limelight.nvstream.input.ControllerPacket;
 import com.limelight.nvstream.input.KeyboardPacket;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
@@ -63,6 +63,7 @@ import android.os.IBinder;
 import android.util.Rational;
 import android.view.Display;
 import android.view.InputDevice;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -126,12 +127,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private int suppressPipRefCount = 0;
     private String pcName;
     private String appName;
+    private NvApp app;
     private float desiredRefreshRate;
 
     private InputCaptureProvider inputCaptureProvider;
     private int modifierFlags = 0;
     private boolean grabbedInput = true;
-    private boolean grabComboDown = false;
+    private boolean cursorVisible = false;
+    private boolean waitingForAllModifiersUp = false;
+    private int specialKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private StreamView streamView;
     private long lastAbsTouchUpTime = 0;
     private long lastAbsTouchDownTime = 0;
@@ -142,8 +146,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private TextView notificationOverlayView;
     private int requestedNotificationOverlayVisibility = View.GONE;
     private TextView performanceOverlayView;
-
-    private ShortcutHelper shortcutHelper;
 
     private MediaCodecDecoderRenderer decoderRenderer;
     private boolean reportedCrash;
@@ -179,8 +181,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
 
-    private LutenPackInput lutenPack;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -195,14 +195,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // If we're going to use immersive mode, we want to have
         // the entire screen
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                        View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
 
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN);
-        }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN);
 
         // Listen for UI visibility events
         getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(this);
@@ -250,7 +248,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         View backgroundTouchView = findViewById(R.id.backgroundTouchView);
         backgroundTouchView.setOnTouchListener(this);
 
-        boolean needsInputBatching = false;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // Request unbuffered input event dispatching for all input classes we handle here.
             // Without this, input events are buffered to be delivered in lock-step with VBlank,
@@ -269,10 +266,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     InputDevice.SOURCE_CLASS_POSITION | // Touchpads
                     InputDevice.SOURCE_CLASS_TRACKBALL // Mice (pointer capture)
             );
-
-            // Since the OS isn't going to batch for us, we have to batch mouse events to
-            // avoid triggering a bug in GeForce Experience that can lead to massive latency.
-            needsInputBatching = true;
         }
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
@@ -322,9 +315,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         int httpsPort = Game.this.getIntent().getIntExtra(EXTRA_HTTPS_PORT, 0); // 0 is treated as unknown
         int appId = Game.this.getIntent().getIntExtra(EXTRA_APP_ID, StreamConfiguration.INVALID_APP_ID);
         String uniqueId = Game.this.getIntent().getStringExtra(EXTRA_UNIQUEID);
-        String uuid = Game.this.getIntent().getStringExtra(EXTRA_PC_UUID);
         boolean appSupportsHdr = Game.this.getIntent().getBooleanExtra(EXTRA_APP_HDR, false);
         byte[] derCertData = Game.this.getIntent().getByteArrayExtra(EXTRA_SERVER_CERT);
+
+        app = new NvApp(appName != null ? appName : "app", appId, appSupportsHdr);
 
         X509Certificate serverCert = null;
         try {
@@ -339,17 +333,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (appId == StreamConfiguration.INVALID_APP_ID) {
             finish();
             return;
-        }
-
-        // Report this shortcut being used
-        ComputerDetails computer = new ComputerDetails();
-        computer.name = pcName;
-        computer.uuid = uuid;
-        shortcutHelper = new ShortcutHelper(this);
-        shortcutHelper.reportComputerShortcutUsed(computer);
-        if (appName != null) {
-            // This may be null if launched from the "Resume Session" PC context menu item
-            shortcutHelper.reportGameLaunched(computer, new NvApp(appName, appId, appSupportsHdr));
         }
 
         // Initialize the MediaCodec helper before creating the decoder
@@ -411,14 +394,34 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 this);
 
         // Don't stream HDR if the decoder can't support it
-        if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported()) {
+        if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported()) {
             willStreamHdr = false;
-            Toast.makeText(this, "Decoder does not support HEVC Main10HDR10", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Decoder does not support HDR10 profile", Toast.LENGTH_LONG).show();
         }
 
         // Display a message to the user if HEVC was forced on but we still didn't find a decoder
-        if (prefConfig.videoFormat == PreferenceConfiguration.FORCE_H265_ON && !decoderRenderer.isHevcSupported()) {
-            Toast.makeText(this, "No HEVC decoder found.\nFalling back to H.264.", Toast.LENGTH_LONG).show();
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_HEVC && !decoderRenderer.isHevcSupported()) {
+            Toast.makeText(this, "No HEVC decoder found", Toast.LENGTH_LONG).show();
+        }
+
+        // Display a message to the user if AV1 was forced on but we still didn't find a decoder
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_AV1 && !decoderRenderer.isAv1Supported()) {
+            Toast.makeText(this, "No AV1 decoder found", Toast.LENGTH_LONG).show();
+        }
+
+        // H.264 is always supported
+        int supportedVideoFormats = MoonBridge.VIDEO_FORMAT_H264;
+        if (decoderRenderer.isHevcSupported()) {
+            supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265;
+            if (willStreamHdr && decoderRenderer.isHevcMain10Hdr10Supported()) {
+                supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265_MAIN10;
+            }
+        }
+        if (decoderRenderer.isAv1Supported()) {
+            supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_MAIN8;
+            if (willStreamHdr && decoderRenderer.isAv1Main10Supported()) {
+                supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_MAIN10;
+            }
         }
 
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
@@ -463,34 +466,30 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setResolution(prefConfig.width, prefConfig.height)
                 .setLaunchRefreshRate(prefConfig.fps)
                 .setRefreshRate(chosenFrameRate)
-                .setApp(new NvApp(appName != null ? appName : "app", appId, appSupportsHdr))
+                .setApp(app)
                 .setBitrate(prefConfig.bitrate)
                 .setEnableSops(prefConfig.enableSops)
                 .enableLocalAudioPlayback(prefConfig.playHostAudio)
                 .setMaxPacketSize(1392)
                 .setRemoteConfiguration(StreamConfiguration.STREAM_CFG_AUTO) // NvConnection will perform LAN and VPN detection
-                .setHevcBitratePercentageMultiplier(75)
-                .setHevcSupported(decoderRenderer.isHevcSupported())
-                .setEnableHdr(willStreamHdr)
+                .setSupportedVideoFormats(supportedVideoFormats)
                 .setAttachedGamepadMask(gamepadMask)
                 .setClientRefreshRateX100((int)(displayRefreshRate * 100))
                 .setAudioConfiguration(prefConfig.audioConfiguration)
-                .setAudioEncryption(true)
                 .setColorSpace(decoderRenderer.getPreferredColorSpace())
                 .setColorRange(decoderRenderer.getPreferredColorRange())
+                .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
                 .build();
 
         // Initialize the connection
         conn = new NvConnection(getApplicationContext(),
                 new ComputerDetails.AddressTuple(host, port),
                 httpsPort, uniqueId, config,
-                PlatformBinding.getCryptoProvider(this), serverCert,
-                needsInputBatching);
+                PlatformBinding.getCryptoProvider(this), serverCert);
         controllerHandler = new ControllerHandler(this, conn, this, prefConfig);
         keyboardTranslator = new KeyboardTranslator();
 
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
-        inputManager.registerInputDeviceListener(controllerHandler, null);
         inputManager.registerInputDeviceListener(keyboardTranslator, null);
 
         // Initialize touch contexts
@@ -503,12 +502,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         REFERENCE_HORIZ_RES, REFERENCE_VERT_RES,
                         streamView, prefConfig);
             }
-        }
-
-        // Use sustained performance mode on N+ to ensure consistent
-        // CPU availability
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            getWindow().setSustainedPerformanceMode(true);
         }
 
         if (prefConfig.onscreenController) {
@@ -538,8 +531,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
 
-        lutenPack = new LutenPackInput(this,conn);
-        lutenPack.onActivityEvent(0);
         // The connection will be started when the surface gets created
         streamView.getHolder().addCallback(this);
     }
@@ -567,39 +558,19 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
 
             if (desiredOrientation == Configuration.ORIENTATION_LANDSCAPE) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
-                }
-                else {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                }
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
             }
             else if (desiredOrientation == Configuration.ORIENTATION_PORTRAIT) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
-                }
-                else {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
-                }
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
             }
             else {
                 // If we don't have a reason to lock to portrait or landscape, allow any orientation
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
-                }
-                else {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
-                }
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
             }
         }
         else {
             // For regular displays, we always request landscape
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
-            }
-            else {
-                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-            }
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
         }
     }
 
@@ -627,6 +598,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 performanceOverlayView.setVisibility(View.GONE);
                 notificationOverlayView.setVisibility(View.GONE);
 
+                // Disable sensors while in PiP mode
+                controllerHandler.disableSensors();
+
                 // Update GameManager state to indicate we're in PiP (still gaming, but interruptible)
                 UiHelper.notifyStreamEnteringPiP(this);
             }
@@ -644,6 +618,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 }
 
                 notificationOverlayView.setVisibility(requestedNotificationOverlayVisibility);
+
+                // Enable sensors again after exiting PiP
+                controllerHandler.enableSensors();
 
                 // Update GameManager state to indicate we're out of PiP (gaming, non-interruptible)
                 UiHelper.notifyStreamExitingPiP(this);
@@ -921,7 +898,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             displayRefreshRate = bestMode.getRefreshRate();
         }
         // On L, we can at least tell the OS that we want a refresh rate
-        else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        else {
             float bestRefreshRate = display.getRefreshRate();
             for (float candidate : display.getSupportedRefreshRates()) {
                 LimeLog.info("Examining refresh rate: "+candidate);
@@ -945,19 +922,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // Apply the refresh rate change
             getWindow().setAttributes(windowLayoutParams);
         }
-        else {
-            // Otherwise, the active display refresh rate is just
-            // whatever is currently in use.
-            displayRefreshRate = display.getRefreshRate();
-        }
 
-        // From 4.4 to 5.1 we can't ask for a 4K display mode, so we'll
+        // Until Marshmallow, we can't ask for a 4K display mode, so we'll
         // need to hint the OS to provide one.
         boolean aspectRatioMatch = false;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT &&
-                Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
-            // On KitKat and later (where we can use the whole screen via immersive mode), we'll
-            // calculate whether we need to scale by aspect ratio or not. If not, we'll use
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            // We'll calculate whether we need to scale by aspect ratio. If not, we'll use
             // setFixedSize so we can handle 4K properly. The only known devices that have
             // >= 4K screens have exactly 4K screens, so we'll be able to hit this good path
             // on these devices. On Marshmallow, we can start changing to 4K manually but no
@@ -1012,8 +982,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     Game.this.getWindow().getDecorView().setSystemUiVisibility(
                             View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
                 }
-                // Use immersive mode on 4.4+ or standard low profile on previous builds
-                else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                else {
+                    // Use immersive mode
                     Game.this.getWindow().getDecorView().setSystemUiVisibility(
                             View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
                             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
@@ -1021,11 +991,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
                             View.SYSTEM_UI_FLAG_FULLSCREEN |
                             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-                }
-                else {
-                    Game.this.getWindow().getDecorView().setSystemUiVisibility(
-                            View.SYSTEM_UI_FLAG_FULLSCREEN |
-                            View.SYSTEM_UI_FLAG_LOW_PROFILE);
                 }
             }
     };
@@ -1049,16 +1014,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // that case here too.
         if (isInMultiWindowMode) {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-
-            // Disable performance optimizations for foreground
-            getWindow().setSustainedPerformanceMode(false);
             decoderRenderer.notifyVideoBackground();
         }
         else {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-
-            // Enable performance optimizations for foreground
-            getWindow().setSustainedPerformanceMode(true);
             decoderRenderer.notifyVideoForeground();
         }
 
@@ -1070,13 +1029,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     protected void onDestroy() {
         super.onDestroy();
 
-        lutenPack.onDestory();
-
-        InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         if (controllerHandler != null) {
-            inputManager.unregisterInputDeviceListener(controllerHandler);
+            controllerHandler.destroy();
         }
         if (keyboardTranslator != null) {
+            InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
             inputManager.unregisterInputDeviceListener(keyboardTranslator);
         }
 
@@ -1094,6 +1051,21 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // Destroy the capture provider
         inputCaptureProvider.destroy();
+    }
+
+    @Override
+    protected void onPause() {
+        if (isFinishing()) {
+            // Stop any further input device notifications before we lose focus (and pointer capture)
+            if (controllerHandler != null) {
+                controllerHandler.stop();
+            }
+
+            // Ungrab input to prevent further input device notifications
+            setInputGrabState(false);
+        }
+
+        super.onPause();
     }
 
     @Override
@@ -1129,15 +1101,26 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                 // Add the video codec to the post-stream toast
                 if (message != null) {
-                    if (videoFormat == MoonBridge.VIDEO_FORMAT_H265_MAIN10) {
-                        message += " [HEVC HDR]";
+                    message += " [";
+
+                    if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H264) != 0) {
+                        message += "H.264";
                     }
-                    else if (videoFormat == MoonBridge.VIDEO_FORMAT_H265) {
-                        message += " [HEVC]";
+                    else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H265) != 0) {
+                        message += "HEVC";
                     }
-                    else if (videoFormat == MoonBridge.VIDEO_FORMAT_H264) {
-                        message += " [H.264]";
+                    else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_AV1) != 0) {
+                        message += "AV1";
                     }
+                    else {
+                        message += "UNKNOWN";
+                    }
+
+                    if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0) {
+                        message += " HDR";
+                    }
+
+                    message += "]";
                 }
 
                 if (message != null) {
@@ -1161,6 +1144,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // Grab/ungrab the mouse cursor
         if (grab) {
             inputCaptureProvider.enableCapture();
+
+            // Enabling capture may hide the cursor again, so
+            // we will need to show it again.
+            if (cursorVisible) {
+                inputCaptureProvider.showCursor();
+            }
         }
         else {
             inputCaptureProvider.disableCapture();
@@ -1182,6 +1171,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     // Returns true if the key stroke was consumed
     private boolean handleSpecialKeys(int androidKeyCode, boolean down) {
         int modifierMask = 0;
+        int nonModifierKeyCode = KeyEvent.KEYCODE_UNKNOWN;
 
         if (androidKeyCode == KeyEvent.KEYCODE_CTRL_LEFT ||
             androidKeyCode == KeyEvent.KEYCODE_CTRL_RIGHT) {
@@ -1199,6 +1189,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 androidKeyCode == KeyEvent.KEYCODE_META_RIGHT) {
             modifierMask = KeyboardPacket.MODIFIER_META;
         }
+        else {
+            nonModifierKeyCode = androidKeyCode;
+        }
 
         if (down) {
             this.modifierFlags |= modifierMask;
@@ -1207,37 +1200,73 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             this.modifierFlags &= ~modifierMask;
         }
 
-        // Check if Ctrl+Alt+Shift+Z is pressed
-        if (androidKeyCode == KeyEvent.KEYCODE_Z &&
-            (modifierFlags & (KeyboardPacket.MODIFIER_CTRL | KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT)) ==
-                (KeyboardPacket.MODIFIER_CTRL | KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT))
-        {
-            if (down) {
-                // Now that we've pressed the magic combo
-                // we'll wait for one of the keys to come up
-                grabComboDown = true;
+        // Handle the special combos on the key up
+        if (waitingForAllModifiersUp || specialKeyCode != KeyEvent.KEYCODE_UNKNOWN) {
+            if (specialKeyCode == androidKeyCode) {
+                // If this is a key up for the special key itself, eat that because the host never saw the original key down
+                return true;
+            }
+            else if (modifierFlags != 0) {
+                // While we're waiting for modifiers to come up, eat all key downs and allow all key ups to pass
+                return down;
             }
             else {
-                // Toggle the grab if Z comes up
-                Handler h = getWindow().getDecorView().getHandler();
-                if (h != null) {
-                    h.postDelayed(toggleGrab, 250);
+                // When all modifiers are up, perform the special action
+                switch (specialKeyCode) {
+                    // Toggle input grab
+                    case KeyEvent.KEYCODE_Z:
+                        Handler h = getWindow().getDecorView().getHandler();
+                        if (h != null) {
+                            h.postDelayed(toggleGrab, 250);
+                        }
+                        break;
+
+                    // Quit
+                    case KeyEvent.KEYCODE_Q:
+                        finish();
+                        break;
+
+                    // Toggle cursor visibility
+                    case KeyEvent.KEYCODE_C:
+                        if (!grabbedInput) {
+                            inputCaptureProvider.enableCapture();
+                            grabbedInput = true;
+                        }
+                        cursorVisible = !cursorVisible;
+                        if (cursorVisible) {
+                            inputCaptureProvider.showCursor();
+                        } else {
+                            inputCaptureProvider.hideCursor();
+                        }
+                        break;
+
+                    default:
+                        break;
                 }
 
-                grabComboDown = false;
+                // Reset special key state
+                specialKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+                waitingForAllModifiersUp = false;
             }
-
-            return true;
         }
-        // Toggle the grab if control or shift comes up
-        else if (grabComboDown) {
-            Handler h = getWindow().getDecorView().getHandler();
-            if (h != null) {
-                h.postDelayed(toggleGrab, 250);
-            }
+        // Check if Ctrl+Alt+Shift is down when a non-modifier key is pressed
+        else if ((modifierFlags & (KeyboardPacket.MODIFIER_CTRL | KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT)) ==
+                (KeyboardPacket.MODIFIER_CTRL | KeyboardPacket.MODIFIER_ALT | KeyboardPacket.MODIFIER_SHIFT) &&
+                (down && nonModifierKeyCode != KeyEvent.KEYCODE_UNKNOWN)) {
+            switch (androidKeyCode) {
+                case KeyEvent.KEYCODE_Z:
+                case KeyEvent.KEYCODE_Q:
+                case KeyEvent.KEYCODE_C:
+                    // Remember that a special key combo was activated, so we can consume all key
+                    // events until the modifiers come up
+                    specialKeyCode = androidKeyCode;
+                    waitingForAllModifiersUp = true;
+                    return true;
 
-            grabComboDown = false;
-            return true;
+                default:
+                    // This isn't a special combo that we consume on the client side
+                    return false;
+            }
         }
 
         // Not a special combo
@@ -1311,20 +1340,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             handled = controllerHandler.handleButtonDown(event);
         }
 
+        // Try the keyboard handler if it wasn't handled as a game controller
         if (!handled) {
-            // Try the keyboard handler
-            short translated = keyboardTranslator.translate(event.getKeyCode(), event.getDeviceId());
-            if (translated == 0) {
-                return false;
-            }
-
             // Let this method take duplicate key down events
             if (handleSpecialKeys(event.getKeyCode(), true)) {
-                return true;
-            }
-
-            // Eat repeat down events
-            if (event.getRepeatCount() > 0) {
                 return true;
             }
 
@@ -1333,11 +1352,31 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return false;
             }
 
-            byte modifiers = getModifierState(event);
-            if (KeyboardTranslator.needsShift(event.getKeyCode())) {
-                modifiers |= KeyboardPacket.MODIFIER_SHIFT;
+            // We'll send it as a raw key event if we have a key mapping, otherwise we'll send it
+            // as UTF-8 text (if it's a printable character).
+            short translated = keyboardTranslator.translate(event.getKeyCode(), event.getDeviceId());
+            if (translated == 0) {
+                // Make sure it has a valid Unicode representation and it's not a dead character
+                // (which we don't support). If those are true, we can send it as UTF-8 text.
+                //
+                // NB: We need to be sure this happens before the getRepeatCount() check because
+                // UTF-8 events don't auto-repeat on the host side.
+                int unicodeChar = event.getUnicodeChar();
+                if ((unicodeChar & KeyCharacterMap.COMBINING_ACCENT) == 0 && (unicodeChar & KeyCharacterMap.COMBINING_ACCENT_MASK) != 0) {
+                    conn.sendUtf8Text(""+(char)unicodeChar);
+                    return true;
+                }
+
+                return false;
             }
-            conn.sendKeyboardInput(translated, KeyboardPacket.KEY_DOWN, modifiers);
+
+            // Eat repeat down events
+            if (event.getRepeatCount() > 0) {
+                return true;
+            }
+
+            conn.sendKeyboardInput(translated, KeyboardPacket.KEY_DOWN, getModifierState(event),
+                    keyboardTranslator.hasNormalizedMapping(event.getKeyCode(), event.getDeviceId()) ? 0 : MoonBridge.SS_KBE_FLAG_NON_NORMALIZED);
         }
 
         return true;
@@ -1381,13 +1420,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             handled = controllerHandler.handleButtonUp(event);
         }
 
+        // Try the keyboard handler if it wasn't handled as a game controller
         if (!handled) {
-            // Try the keyboard handler
-            short translated = keyboardTranslator.translate(event.getKeyCode(), event.getDeviceId());
-            if (translated == 0) {
-                return false;
-            }
-
             if (handleSpecialKeys(event.getKeyCode(), false)) {
                 return true;
             }
@@ -1397,13 +1431,40 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return false;
             }
 
-            byte modifiers = getModifierState(event);
-            if (KeyboardTranslator.needsShift(event.getKeyCode())) {
-                modifiers |= KeyboardPacket.MODIFIER_SHIFT;
+            short translated = keyboardTranslator.translate(event.getKeyCode(), event.getDeviceId());
+            if (translated == 0) {
+                // If we sent this event as UTF-8 on key down, also report that it was handled
+                // when we get the key up event for it.
+                int unicodeChar = event.getUnicodeChar();
+                return (unicodeChar & KeyCharacterMap.COMBINING_ACCENT) == 0 && (unicodeChar & KeyCharacterMap.COMBINING_ACCENT_MASK) != 0;
             }
-            conn.sendKeyboardInput(translated, KeyboardPacket.KEY_UP, modifiers);
+
+            conn.sendKeyboardInput(translated, KeyboardPacket.KEY_UP, getModifierState(event),
+                    keyboardTranslator.hasNormalizedMapping(event.getKeyCode(), event.getDeviceId()) ? 0 : MoonBridge.SS_KBE_FLAG_NON_NORMALIZED);
         }
 
+        return true;
+    }
+
+    @Override
+    public boolean onKeyMultiple(int keyCode, int repeatCount, KeyEvent event) {
+        return handleKeyMultiple(event) || super.onKeyMultiple(keyCode, repeatCount, event);
+    }
+
+    private boolean handleKeyMultiple(KeyEvent event) {
+        // We can receive keys from a software keyboard that don't correspond to any existing
+        // KEYCODE value. Android will give those to us as an ACTION_MULTIPLE KeyEvent.
+        //
+        // Despite the fact that the Android docs say this is unused since API level 29, these
+        // events are still sent as of Android 13 for the above case.
+        //
+        // For other cases of ACTION_MULTIPLE, we will not report those as handled so hopefully
+        // they will be passed to us again as regular singular key events.
+        if (event.getKeyCode() != KeyEvent.KEYCODE_UNKNOWN || event.getCharacters() == null) {
+            return false;
+        }
+
+        conn.sendUtf8Text(event.getCharacters());
         return true;
     }
 
@@ -1424,19 +1485,299 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         inputManager.toggleSoftInput(0, 0);
     }
 
+    private byte getLiTouchTypeFromEvent(MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                return MoonBridge.LI_TOUCH_EVENT_DOWN;
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if ((event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
+                    return MoonBridge.LI_TOUCH_EVENT_CANCEL;
+                }
+                else {
+                    return MoonBridge.LI_TOUCH_EVENT_UP;
+                }
+
+            case MotionEvent.ACTION_MOVE:
+                return MoonBridge.LI_TOUCH_EVENT_MOVE;
+
+            case MotionEvent.ACTION_CANCEL:
+                // ACTION_CANCEL applies to *all* pointers in the gesture, so it maps to CANCEL_ALL
+                // rather than CANCEL. For a single pointer cancellation, that's indicated via
+                // FLAG_CANCELED on a ACTION_POINTER_UP.
+                // https://developer.android.com/develop/ui/views/touch-and-input/gestures/multi
+                return MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL;
+
+            case MotionEvent.ACTION_HOVER_ENTER:
+            case MotionEvent.ACTION_HOVER_MOVE:
+                return MoonBridge.LI_TOUCH_EVENT_HOVER;
+
+            case MotionEvent.ACTION_HOVER_EXIT:
+                return MoonBridge.LI_TOUCH_EVENT_HOVER_LEAVE;
+
+            case MotionEvent.ACTION_BUTTON_PRESS:
+            case MotionEvent.ACTION_BUTTON_RELEASE:
+                return MoonBridge.LI_TOUCH_EVENT_BUTTON_ONLY;
+
+            default:
+               return -1;
+        }
+    }
+
+    private float[] getStreamViewRelativeNormalizedXY(View view, MotionEvent event, int pointerIndex) {
+        float normalizedX = event.getX(pointerIndex);
+        float normalizedY = event.getY(pointerIndex);
+
+        // For the containing background view, we must subtract the origin
+        // of the StreamView to get video-relative coordinates.
+        if (view != streamView) {
+            normalizedX -= streamView.getX();
+            normalizedY -= streamView.getY();
+        }
+
+        normalizedX = Math.max(normalizedX, 0.0f);
+        normalizedY = Math.max(normalizedY, 0.0f);
+
+        normalizedX = Math.min(normalizedX, streamView.getWidth());
+        normalizedY = Math.min(normalizedY, streamView.getHeight());
+
+        normalizedX /= streamView.getWidth();
+        normalizedY /= streamView.getHeight();
+
+        return new float[] { normalizedX, normalizedY };
+    }
+
+    private static float normalizeValueInRange(float value, InputDevice.MotionRange range) {
+        return (value - range.getMin()) / range.getRange();
+    }
+
+    private static float getPressureOrDistance(MotionEvent event, int pointerIndex) {
+        InputDevice dev = event.getDevice();
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_HOVER_ENTER:
+            case MotionEvent.ACTION_HOVER_MOVE:
+            case MotionEvent.ACTION_HOVER_EXIT:
+                // Hover events report distance
+                if (dev != null) {
+                    InputDevice.MotionRange distanceRange = dev.getMotionRange(MotionEvent.AXIS_DISTANCE, event.getSource());
+                    if (distanceRange != null) {
+                        return normalizeValueInRange(event.getAxisValue(MotionEvent.AXIS_DISTANCE, pointerIndex), distanceRange);
+                    }
+                }
+                return 0.0f;
+
+            default:
+                // Other events report pressure
+                return event.getPressure(pointerIndex);
+        }
+    }
+
+    private static short getRotationDegrees(MotionEvent event, int pointerIndex) {
+        InputDevice dev = event.getDevice();
+        if (dev != null) {
+            if (dev.getMotionRange(MotionEvent.AXIS_ORIENTATION, event.getSource()) != null) {
+                short rotationDegrees = (short) Math.toDegrees(event.getOrientation(pointerIndex));
+                if (rotationDegrees < 0) {
+                    rotationDegrees += 360;
+                }
+                return rotationDegrees;
+            }
+        }
+        return MoonBridge.LI_ROT_UNKNOWN;
+    }
+
+    private static float[] polarToCartesian(float r, float theta) {
+        return new float[] { (float)(r * Math.cos(theta)), (float)(r * Math.sin(theta)) };
+    }
+
+    private static float cartesianToR(float[] point) {
+        return (float)Math.sqrt(Math.pow(point[0], 2) + Math.pow(point[1], 2));
+    }
+
+    private float[] getStreamViewNormalizedContactArea(MotionEvent event, int pointerIndex) {
+        float orientation;
+
+        // If the orientation is unknown, we'll just assume it's at a 45 degree angle and scale it by
+        // X and Y scaling factors evenly.
+        if (event.getDevice() == null || event.getDevice().getMotionRange(MotionEvent.AXIS_ORIENTATION, event.getSource()) == null) {
+            orientation = (float)(Math.PI / 4);
+        }
+        else {
+            orientation = event.getOrientation(pointerIndex);
+        }
+
+        float contactAreaMajor, contactAreaMinor;
+        switch (event.getActionMasked()) {
+            // Hover events report the tool size
+            case MotionEvent.ACTION_HOVER_ENTER:
+            case MotionEvent.ACTION_HOVER_MOVE:
+            case MotionEvent.ACTION_HOVER_EXIT:
+                contactAreaMajor = event.getToolMajor(pointerIndex);
+                contactAreaMinor = event.getToolMinor(pointerIndex);
+                break;
+
+            // Other events report contact area
+            default:
+                contactAreaMajor = event.getTouchMajor(pointerIndex);
+                contactAreaMinor = event.getTouchMinor(pointerIndex);
+                break;
+        }
+
+        // The contact area major axis is parallel to the orientation, so we simply convert
+        // polar to cartesian coordinates using the orientation as theta.
+        float[] contactAreaMajorCartesian = polarToCartesian(contactAreaMajor, orientation);
+
+        // The contact area minor axis is perpendicular to the contact area major axis (and thus
+        // the orientation), so rotate the orientation angle by 90 degrees.
+        float[] contactAreaMinorCartesian = polarToCartesian(contactAreaMinor, (float)(orientation + (Math.PI / 2)));
+
+        // Normalize the contact area to the stream view size
+        contactAreaMajorCartesian[0] = Math.min(Math.abs(contactAreaMajorCartesian[0]), streamView.getWidth()) / streamView.getWidth();
+        contactAreaMinorCartesian[0] = Math.min(Math.abs(contactAreaMinorCartesian[0]), streamView.getWidth()) / streamView.getWidth();
+        contactAreaMajorCartesian[1] = Math.min(Math.abs(contactAreaMajorCartesian[1]), streamView.getHeight()) / streamView.getHeight();
+        contactAreaMinorCartesian[1] = Math.min(Math.abs(contactAreaMinorCartesian[1]), streamView.getHeight()) / streamView.getHeight();
+
+        // Convert the normalized values back into polar coordinates
+        return new float[] { cartesianToR(contactAreaMajorCartesian), cartesianToR(contactAreaMinorCartesian) };
+    }
+
+    private boolean sendPenEventForPointer(View view, MotionEvent event, byte eventType, byte toolType, int pointerIndex) {
+        byte penButtons = 0;
+        if ((event.getButtonState() & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0) {
+            penButtons |= MoonBridge.LI_PEN_BUTTON_PRIMARY;
+        }
+        if ((event.getButtonState() & MotionEvent.BUTTON_STYLUS_SECONDARY) != 0) {
+            penButtons |= MoonBridge.LI_PEN_BUTTON_SECONDARY;
+        }
+
+        byte tiltDegrees = MoonBridge.LI_TILT_UNKNOWN;
+        InputDevice dev = event.getDevice();
+        if (dev != null) {
+            if (dev.getMotionRange(MotionEvent.AXIS_TILT, event.getSource()) != null) {
+                tiltDegrees = (byte)Math.toDegrees(event.getAxisValue(MotionEvent.AXIS_TILT, pointerIndex));
+            }
+        }
+
+        float[] normalizedCoords = getStreamViewRelativeNormalizedXY(view, event, pointerIndex);
+        float[] normalizedContactArea = getStreamViewNormalizedContactArea(event, pointerIndex);
+        return conn.sendPenEvent(eventType, toolType, penButtons,
+                normalizedCoords[0], normalizedCoords[1],
+                getPressureOrDistance(event, pointerIndex),
+                normalizedContactArea[0], normalizedContactArea[1],
+                getRotationDegrees(event, pointerIndex), tiltDegrees) != MoonBridge.LI_ERR_UNSUPPORTED;
+    }
+
+    private static byte convertToolTypeToStylusToolType(MotionEvent event, int pointerIndex) {
+        switch (event.getToolType(pointerIndex)) {
+            case MotionEvent.TOOL_TYPE_ERASER:
+                return MoonBridge.LI_TOOL_TYPE_ERASER;
+            case MotionEvent.TOOL_TYPE_STYLUS:
+                return MoonBridge.LI_TOOL_TYPE_PEN;
+            default:
+                return MoonBridge.LI_TOOL_TYPE_UNKNOWN;
+        }
+    }
+
+    private boolean trySendPenEvent(View view, MotionEvent event) {
+        byte eventType = getLiTouchTypeFromEvent(event);
+        if (eventType < 0) {
+            return false;
+        }
+
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            // Move events may impact all active pointers
+            boolean handledStylusEvent = false;
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                byte toolType = convertToolTypeToStylusToolType(event, i);
+                if (toolType == MoonBridge.LI_TOOL_TYPE_UNKNOWN) {
+                    // Not a stylus pointer, so skip it
+                    continue;
+                }
+                else {
+                    // This pointer is a stylus, so we'll report that we handled this event
+                    handledStylusEvent = true;
+                }
+
+                if (!sendPenEventForPointer(view, event, eventType, toolType, i)) {
+                    // Pen events aren't supported by the host
+                    return false;
+                }
+            }
+            return handledStylusEvent;
+        }
+        else if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            // Cancel impacts all active pointers
+            return conn.sendPenEvent(MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL, MoonBridge.LI_TOOL_TYPE_UNKNOWN, (byte)0,
+                    0, 0, 0, 0, 0,
+                    MoonBridge.LI_ROT_UNKNOWN, MoonBridge.LI_TILT_UNKNOWN) != MoonBridge.LI_ERR_UNSUPPORTED;
+        }
+        else {
+            // Up, Down, and Hover events are specific to the action index
+            byte toolType = convertToolTypeToStylusToolType(event, event.getActionIndex());
+            if (toolType == MoonBridge.LI_TOOL_TYPE_UNKNOWN) {
+                // Not a stylus event
+                return false;
+            }
+            return sendPenEventForPointer(view, event, eventType, toolType, event.getActionIndex());
+        }
+    }
+
+    private boolean sendTouchEventForPointer(View view, MotionEvent event, byte eventType, int pointerIndex) {
+        float[] normalizedCoords = getStreamViewRelativeNormalizedXY(view, event, pointerIndex);
+        float[] normalizedContactArea = getStreamViewNormalizedContactArea(event, pointerIndex);
+        return conn.sendTouchEvent(eventType, event.getPointerId(pointerIndex),
+                normalizedCoords[0], normalizedCoords[1],
+                getPressureOrDistance(event, pointerIndex),
+                normalizedContactArea[0], normalizedContactArea[1],
+                getRotationDegrees(event, pointerIndex)) != MoonBridge.LI_ERR_UNSUPPORTED;
+    }
+
+    private boolean trySendTouchEvent(View view, MotionEvent event) {
+        byte eventType = getLiTouchTypeFromEvent(event);
+        if (eventType < 0) {
+            return false;
+        }
+
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            // Move events may impact all active pointers
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                if (!sendTouchEventForPointer(view, event, eventType, i)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        else if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            // Cancel impacts all active pointers
+            return conn.sendTouchEvent(MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL, 0,
+                    0, 0, 0, 0, 0,
+                    MoonBridge.LI_ROT_UNKNOWN) != MoonBridge.LI_ERR_UNSUPPORTED;
+        }
+        else {
+            // Up, Down, and Hover events are specific to the action index
+            return sendTouchEventForPointer(view, event, eventType, event.getActionIndex());
+        }
+    }
+
     // Returns true if the event was consumed
     // NB: View is only present if called from a view callback
     private boolean handleMotionEvent(View view, MotionEvent event) {
-        // Pass through keyboard input if we're not grabbing
+        // Pass through mouse/touch/joystick input if we're not grabbing
         if (!grabbedInput) {
             return false;
         }
 
         int eventSource = event.getSource();
+        int deviceSources = event.getDevice() != null ? event.getDevice().getSources() : 0;
         if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
             if (controllerHandler.handleMotionEvent(event)) {
                 return true;
             }
+        }
+        else if ((deviceSources & InputDevice.SOURCE_CLASS_JOYSTICK) != 0 && controllerHandler.tryHandleTouchpadEvent(event)) {
+            return true;
         }
         else if ((eventSource & InputDevice.SOURCE_CLASS_POINTER) != 0 ||
                  (eventSource & InputDevice.SOURCE_CLASS_POSITION) != 0 ||
@@ -1491,7 +1832,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                     if (deltaX != 0 || deltaY != 0) {
                         if (prefConfig.absoluteMouseMode) {
-                            conn.sendMouseMoveAsMousePosition(deltaX, deltaY, (short)view.getWidth(), (short)view.getHeight());
+                            // NB: view may be null, but we can unconditionally use streamView because we don't need to adjust
+                            // relative axis deltas for the position of the streamView within the parent's coordinate system.
+                            conn.sendMouseMoveAsMousePosition(deltaX, deltaY, (short)streamView.getWidth(), (short)streamView.getHeight());
                         }
                         else {
                             conn.sendMouseMove(deltaX, deltaY);
@@ -1524,6 +1867,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         }
                     }
                 }
+                else if (view != null && trySendPenEvent(view, event)) {
+                    // If our host supports pen events, send it directly
+                    return true;
+                }
                 else if (view != null) {
                     // Otherwise send absolute position based on the view for SOURCE_CLASS_POINTER
                     updateMousePosition(view, event);
@@ -1532,6 +1879,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 if (event.getActionMasked() == MotionEvent.ACTION_SCROLL) {
                     // Send the vertical scroll packet
                     conn.sendMouseHighResScroll((short)(event.getAxisValue(MotionEvent.AXIS_VSCROLL) * 120));
+                    conn.sendMouseHighResHScroll((short)(event.getAxisValue(MotionEvent.AXIS_HSCROLL) * 120));
                 }
 
                 if ((changedButtons & MotionEvent.BUTTON_PRIMARY) != 0) {
@@ -1664,6 +2012,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                     return true;
                 }
+
+                // TODO: Re-enable native touch when have a better solution for handling
+                // cancelled touches from Android gestures and 3 finger taps to activate
+                // the software keyboard.
+                /*if (!prefConfig.touchscreenTrackpad && trySendTouchEvent(view, event)) {
+                    // If this host supports touch events and absolute touch is enabled,
+                    // send it directly as a touch event.
+                    return true;
+                }*/
 
                 TouchContext context = getTouchContext(actionIndex);
                 if (context == null) {
@@ -1823,13 +2180,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public boolean onTouch(View view, MotionEvent event) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                // Tell the OS not to buffer input events for us
-                //
-                // NB: This is still needed even when we call the newer requestUnbufferedDispatch()!
-                view.requestUnbufferedDispatch(event);
-            }
+        if (event.getAction() == MotionEvent.ACTION_DOWN) {
+            // Tell the OS not to buffer input events for us
+            //
+            // NB: This is still needed even when we call the newer requestUnbufferedDispatch()!
+            view.requestUnbufferedDispatch(event);
         }
 
         return handleMotionEvent(view, event);
@@ -1927,6 +2282,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 // Let the display go to sleep now
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+                // Stop processing controller input
+                controllerHandler.stop();
+
                 // Ungrab input
                 setInputGrabState(false);
 
@@ -1964,7 +2322,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                                     break;
 
                                 default:
-                                    message = getResources().getString(R.string.conn_terminated_msg);
+                                    String errorCodeString;
+                                    // We'll assume large errors are hex values
+                                    if (Math.abs(errorCode) > 1000) {
+                                        errorCodeString = Integer.toHexString(errorCode);
+                                    }
+                                    else {
+                                        errorCodeString = Integer.toString(errorCode);
+                                    }
+                                    message = getResources().getString(R.string.conn_terminated_msg) + "\n\n" +
+                                            getResources().getString(R.string.error_code_prefix) + " " + errorCodeString;
                                     break;
                             }
                         }
@@ -2051,6 +2418,17 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 hideSystemUi(1000);
             }
         });
+
+        // Report this shortcut being used (off the main thread to prevent ANRs)
+        ComputerDetails computer = new ComputerDetails();
+        computer.name = pcName;
+        computer.uuid = Game.this.getIntent().getStringExtra(EXTRA_PC_UUID);
+        ShortcutHelper shortcutHelper = new ShortcutHelper(this);
+        shortcutHelper.reportComputerShortcutUsed(computer);
+        if (appName != null) {
+            // This may be null if launched from the "Resume Session" PC context menu item
+            shortcutHelper.reportGameLaunched(computer, app);
+        }
     }
 
     @Override
@@ -2083,9 +2461,26 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     @Override
-    public void setHdrMode(boolean enabled) {
+    public void rumbleTriggers(short controllerNumber, short leftTrigger, short rightTrigger) {
+        LimeLog.info(String.format((Locale)null, "Rumble on gamepad triggers %d: %04x %04x", controllerNumber, leftTrigger, rightTrigger));
+
+        controllerHandler.handleRumbleTriggers(controllerNumber, leftTrigger, rightTrigger);
+    }
+
+    @Override
+    public void setHdrMode(boolean enabled, byte[] hdrMetadata) {
         LimeLog.info("Display HDR mode: " + (enabled ? "enabled" : "disabled"));
-        decoderRenderer.setHdrMode(enabled);
+        decoderRenderer.setHdrMode(enabled, hdrMetadata);
+    }
+
+    @Override
+    public void setMotionEventState(short controllerNumber, byte motionType, short reportRateHz) {
+        controllerHandler.handleSetMotionEventState(controllerNumber, motionType, reportRateHz);
+    }
+
+    @Override
+    public void setControllerLED(short controllerNumber, byte r, byte g, byte b) {
+        controllerHandler.handleSetControllerLED(controllerNumber, r, g, b);
     }
 
     @Override
@@ -2198,8 +2593,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     @Override
-    public void mouseScroll(byte amount) {
+    public void mouseVScroll(byte amount) {
         conn.sendMouseScroll(amount);
+    }
+
+    @Override
+    public void mouseHScroll(byte amount) {
+        conn.sendMouseHScroll(amount);
     }
 
     @Override
@@ -2212,10 +2612,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
 
             if (buttonDown) {
-                conn.sendKeyboardInput(keyMap, KeyboardPacket.KEY_DOWN, getModifierState());
+                conn.sendKeyboardInput(keyMap, KeyboardPacket.KEY_DOWN, getModifierState(), (byte)0);
             }
             else {
-                conn.sendKeyboardInput(keyMap, KeyboardPacket.KEY_UP, getModifierState());
+                conn.sendKeyboardInput(keyMap, KeyboardPacket.KEY_UP, getModifierState(), (byte)0);
             }
         }
     }
@@ -2231,14 +2631,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if ((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
             hideSystemUi(2000);
         }
-        // This flag is only set on 4.4+
-        else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT &&
-                 (visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0) {
-            hideSystemUi(2000);
-        }
-        // This flag is only set before 4.4+
-        else if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.KITKAT &&
-                 (visibility & View.SYSTEM_UI_FLAG_LOW_PROFILE) == 0) {
+        else if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0) {
             hideSystemUi(2000);
         }
     }
@@ -2274,6 +2667,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return handleKeyDown(keyEvent);
             case KeyEvent.ACTION_UP:
                 return handleKeyUp(keyEvent);
+            case KeyEvent.ACTION_MULTIPLE:
+                return handleKeyMultiple(keyEvent);
             default:
                 return false;
         }

@@ -1,5 +1,6 @@
 package com.limelight.binding.input.driver;
 
+import android.annotation.SuppressLint;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.BroadcastReceiver;
@@ -42,7 +43,8 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     private int nextDeviceId;
 
     @Override
-    public void reportControllerState(int controllerId, short buttonFlags, float leftStickX, float leftStickY, float rightStickX, float rightStickY, float leftTrigger, float rightTrigger) {
+    public void reportControllerState(int controllerId, int buttonFlags, float leftStickX, float leftStickY,
+                                      float rightStickX, float rightStickY, float leftTrigger, float rightTrigger) {
         // Call through to the client's listener
         if (listener != null) {
             listener.reportControllerState(controllerId, buttonFlags, leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger, rightTrigger);
@@ -158,7 +160,12 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                     // just returning a false result or returning 0 enumerated devices,
                     // they throw an undocumented SecurityException from this call, crashing
                     // the whole app. :(
-                    usbManager.requestPermission(device, PendingIntent.getBroadcast(UsbDriverService.this, 0, new Intent(ACTION_USB_PERMISSION), intentFlags));
+
+                    // Use an explicit intent to activate our unexported broadcast receiver, as required on Android 14+
+                    Intent i = new Intent(ACTION_USB_PERMISSION);
+                    i.setPackage(getPackageName());
+
+                    usbManager.requestPermission(device, PendingIntent.getBroadcast(UsbDriverService.this, 0, i, intentFlags));
                 } catch (SecurityException e) {
                     Toast.makeText(this, this.getText(R.string.error_usb_prohibited), Toast.LENGTH_LONG).show();
                     if (stateListener != null) {
@@ -204,28 +211,22 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     }
 
     public static boolean isRecognizedInputDevice(UsbDevice device) {
-        // On KitKat and later, we can determine if this VID and PID combo
-        // matches an existing input device and defer to the built-in controller
-        // support in that case. Prior to KitKat, we'll always return true to be safe.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            for (int id : InputDevice.getDeviceIds()) {
-                InputDevice inputDev = InputDevice.getDevice(id);
-                if (inputDev == null) {
-                    // Device was removed while looping
-                    continue;
-                }
-
-                if (inputDev.getVendorId() == device.getVendorId() &&
-                        inputDev.getProductId() == device.getProductId()) {
-                    return true;
-                }
+        // Determine if this VID and PID combo matches an existing input device
+        // and defer to the built-in controller support in that case.
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice inputDev = InputDevice.getDevice(id);
+            if (inputDev == null) {
+                // Device was removed while looping
+                continue;
             }
 
-            return false;
+            if (inputDev.getVendorId() == device.getVendorId() &&
+                    inputDev.getProductId() == device.getProductId()) {
+                return true;
+            }
         }
-        else {
-            return true;
-        }
+
+        return false;
     }
 
     public static boolean kernelSupportsXboxOne() {
@@ -280,8 +281,9 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 ((!kernelSupportsXbox360W() || claimAllAvailable) && Xbox360WirelessDongle.canClaimDevice(device));
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void start() {
-        if (started) {
+        if (started || usbManager == null) {
             return;
         }
 

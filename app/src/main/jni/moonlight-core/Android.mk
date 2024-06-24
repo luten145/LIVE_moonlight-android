@@ -40,6 +40,7 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    moonlight-common-c/enet/win32.c \
                    simplejni.c \
                    callbacks.c \
+                   minisdl.c \
 
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/moonlight-common-c/enet/include \
@@ -54,7 +55,11 @@ endif
 
 LOCAL_LDLIBS := -llog
 
-LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto
+LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures
 LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL
 
+LOCAL_BRANCH_PROTECTION := standard
+
 include $(BUILD_SHARED_LIBRARY)
+
+$(call import-module,android/cpufeatures)
