@@ -2,3 +2,6 @@
 	path = app/src/main/jni/moonlight-core/moonlight-common-c
 	url = https://github.com/luten145/moonlight-common-c
 	branch = lutenpack
+[submodule "LIVE_MoonlightLutenPack"]
+	path = LIVE_MoonlightLutenPack
+	url = https://github.com/luten145/LIVE_MoonlightLutenPack.git

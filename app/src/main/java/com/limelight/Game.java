@@ -1,6 +1,8 @@
 package com.limelight;
 
 
+import com.limelight.LutenPack.LutenConnhandle;
+import com.limelight.LutenPack.LutenPackHandle;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
@@ -36,6 +38,7 @@ import com.limelight.utils.ServerHelper;
 import com.limelight.utils.ShortcutHelper;
 import com.limelight.utils.SpinnerDialog;
 import com.limelight.utils.UiHelper;
+import com.lutenstudio.moonlightlutenpack.LutenPack.LutenActivity;
 
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
@@ -88,7 +91,7 @@ import java.security.cert.X509Certificate;
 import java.util.Locale;
 
 
-public class Game extends Activity implements SurfaceHolder.Callback,
+public class Game extends LutenActivity implements SurfaceHolder.Callback,
         OnGenericMotionListener, OnTouchListener, NvConnectionListener, EvdevListener,
         OnSystemUiVisibilityChangeListener, GameGestures, StreamView.InputCallbacks,
         PerfOverlayListener, UsbDriverService.UsbDriverStateListener, View.OnKeyListener {
@@ -180,6 +183,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public static final String EXTRA_PC_NAME = "PcName";
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
+
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        this.connListener = new LutenConnhandle(Game.this);
+        super.attachBaseContext(newBase);
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -533,6 +542,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // The connection will be started when the surface gets created
         streamView.getHolder().addCallback(this);
+        streamView.getHolder().addCallback(getSurfaceCallback()); // TODO : 여기서 서페이서 콜백이 이루어짐
+    }
+
+    @Override
+    protected void onStart() {
+        start(new LutenPackHandle(conn),streamView,findViewById(R.id.backgroundTouchView));
+        super.onStart();
     }
 
     private void setPreferredOrientationForCurrentDisplay() {
@@ -2497,7 +2513,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
             decoderRenderer.setRenderTarget(holder);
             conn.start(new AndroidAudioRenderer(Game.this, prefConfig.enableAudioFx),
-                    decoderRenderer, Game.this);
+                    decoderRenderer, ((LutenConnhandle)connListener).getListener()); // TODO : 여기서 상속
         }
     }
 

@@ -127,6 +127,14 @@ android {
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+        develop {
+            minifyEnabled false
+            debuggable true
+            applicationIdSuffix ".develop"
+            resValue "string", "app_label", "Moonlight LutenPack (Develop)"
+            versionNameSuffix "-develop"
+            signingConfig signingConfigs.debug
+        }
     }
 
     externalNativeBuild {
@@ -143,4 +151,5 @@ dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'org.jmdns:jmdns:3.5.9'
     implementation 'com.github.cgutman:ShieldControllerExtensions:1.0.1'
+    implementation(project(":LIVE_MoonlightLutenPack"))
 }
